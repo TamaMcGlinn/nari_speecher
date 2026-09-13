@@ -1,4 +1,6 @@
 #include <cstdlib>
+#include <fcntl.h>
+#include <unistd.h>
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -19,6 +21,48 @@ struct AudioSink {
     uint8_t carry = 0;
 
     PaError error = paNoError;
+};
+
+bool verbose()
+{
+    const char* value = std::getenv("SPEECHER_VERBOSE");
+    return value && std::string(value) == "1";
+}
+
+class StderrSilencer {
+public:
+    StderrSilencer()
+    {
+        if (verbose())
+            return;
+
+        fflush(stderr);
+
+        savedStderr_ = dup(STDERR_FILENO);
+        nullFd_ = open("/dev/null", O_WRONLY);
+
+        if (savedStderr_ >= 0 && nullFd_ >= 0)
+            dup2(nullFd_, STDERR_FILENO);
+    }
+
+    ~StderrSilencer()
+    {
+        if (savedStderr_ < 0)
+            return;
+
+        fflush(stderr);
+
+        dup2(savedStderr_, STDERR_FILENO);
+
+        close(savedStderr_);
+
+        if (nullFd_ >= 0)
+            close(nullFd_);
+    }
+
+private:
+    int savedStderr_ = -1;
+    int nullFd_ = -1;
 };
 
 static bool writeSamples(AudioSink* sink,
@@ -208,7 +252,12 @@ int main(int argc, char** argv)
     // PortAudio
     //----------------------------------------------------------------------
 
-    PaError paError = Pa_Initialize();
+    PaError paError;
+
+    {
+      StderrSilencer silence;
+      paError = Pa_Initialize();
+    }
 
     if (paError != paNoError) {
         std::cerr
@@ -221,16 +270,19 @@ int main(int argc, char** argv)
 
     AudioSink sink;
 
-    paError = Pa_OpenDefaultStream(
-        &sink.stream,
-        0,                         // input channels
-        CHANNELS,                  // output channels
-        paInt16,                   // raw PCM = signed int16
-        SAMPLE_RATE,
-        paFramesPerBufferUnspecified,
-        nullptr,                   // no PortAudio callback
-        nullptr
-    );
+    {
+      StderrSilencer silence;
+      paError = Pa_OpenDefaultStream(
+          &sink.stream,
+          0,                         // input channels
+          CHANNELS,                  // output channels
+          paInt16,                   // raw PCM = signed int16
+          SAMPLE_RATE,
+          paFramesPerBufferUnspecified,
+          nullptr,                   // no PortAudio callback
+          nullptr
+      );
+    }
 
     if (paError != paNoError) {
         std::cerr
@@ -384,7 +436,9 @@ int main(int argc, char** argv)
     // returns, so playback starts while the response is being generated.
     //----------------------------------------------------------------------
 
-    std::cout << "Speaking...\n";
+    if (verbose()) {
+      std::cout << "Speaking...\n";
+    }
 
     CURLcode result =
         curl_easy_perform(curl);
@@ -447,7 +501,9 @@ int main(int argc, char** argv)
             << "Warning: response ended with an incomplete PCM sample\n";
     }
 
-    std::cout << "Done.\n";
+    if (verbose()) {
+      std::cout << "Done.\n";
+    }
 
     return 0;
 }
